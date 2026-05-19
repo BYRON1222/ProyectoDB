@@ -1,0 +1,195 @@
+version: '3.9'
+
+services:
+
+  # ─────────────────────────────────────────
+  # BASE DE DATOS PRINCIPAL (PostgreSQL)
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: dataops_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dataops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dataops123}
+      POSTGRES_DB: ${POSTGRES_DB:-dataops_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - dataops_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dataops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # RÉPLICA DE LECTURA (PostgreSQL Replica)
+  # ─────────────────────────────────────────
+  postgres_replica:
+    image: postgres:16
+    container_name: dataops_postgres_replica
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dataops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dataops123}
+      POSTGRES_DB: ${POSTGRES_DB:-dataops_db}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+    networks:
+      - dataops_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────
+  # CACHÉ (Redis)
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: dataops_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - dataops_network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # BACKEND (Node.js + Express)
+  # ─────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dataops_backend
+    restart: always
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      # PostgreSQL
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-dataops}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-dataops123}
+      DB_NAME: ${POSTGRES_DB:-dataops_db}
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # JWT
+      JWT_SECRET: ${JWT_SECRET:-supersecreto_dataops_2024}
+      JWT_EXPIRES_IN: 8h
+      # Email alertas (opcional)
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      # Nube backup
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY:-}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY:-}
+      AWS_BUCKET: ${AWS_BUCKET:-}
+      AZURE_CONNECTION_STRING: ${AZURE_CONNECTION_STRING:-}
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+      - backups_data:/app/backups
+    networks:
+      - dataops_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────
+  # FRONTEND (React)
+  # ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dataops_frontend
+    restart: always
+    environment:
+      VITE_API_URL: http://localhost:4000/api
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - dataops_network
+    depends_on:
+      - backend
+
+  # ─────────────────────────────────────────
+  # MONITOREO (Prometheus)
+  # ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dataops_prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - dataops_network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+
+  # ─────────────────────────────────────────
+  # VISUALIZACIÓN (Grafana)
+  # ─────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dataops_grafana
+    restart: always
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - dataops_network
+    depends_on:
+      - prometheus
+
+# ─────────────────────────────────────────
+# VOLÚMENES PERSISTENTES
+# ─────────────────────────────────────────
+volumes:
+  postgres_data:
+  postgres_replica_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  backups_data:
+
+# ─────────────────────────────────────────
+# RED INTERNA
+# ─────────────────────────────────────────
+networks:
+  dataops_network:
+    driver: bridge

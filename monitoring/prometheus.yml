@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Métricas del propio Prometheus
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Métricas del backend Node.js
+  - job_name: 'dataops_backend'
+    static_configs:
+      - targets: ['backend:4000']
+    metrics_path: '/metrics'
+
+  # Métricas de PostgreSQL (usando postgres_exporter)
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
