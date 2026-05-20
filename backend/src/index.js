@@ -17,6 +17,11 @@ app.use('/api/auth',        require('./routes/auth.routes'));
 app.use('/api/connections', require('./routes/connections.routes'));
 app.use('/api/metrics',     require('./routes/metrics.routes'));
 app.use('/api/queries',     require('./routes/queries.routes'));
+app.use('/api/concurrency', require('./routes/concurrency.routes'));
+app.use('/api/backups',     require('./routes/backup.routes'));
+app.use('/api/replication', require('./routes/replication.routes'));
+app.use('/api/cache',       require('./routes/cache.routes'));
+app.use('/api/alerts',      require('./routes/alerts.routes'));
 
 // Ruta de prueba
 app.get('/', (req, res) => {
