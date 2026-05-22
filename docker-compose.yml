@@ -2,9 +2,6 @@ version: '3.9'
 
 services:
 
-  # ─────────────────────────────────────────
-  # BASE DE DATOS PRINCIPAL (PostgreSQL)
-  # ─────────────────────────────────────────
   postgres:
     image: postgres:16
     container_name: dataops_postgres
@@ -26,9 +23,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─────────────────────────────────────────
-  # RÉPLICA DE LECTURA (PostgreSQL Replica)
-  # ─────────────────────────────────────────
   postgres_replica:
     image: postgres:16
     container_name: dataops_postgres_replica
@@ -47,9 +41,6 @@ services:
       postgres:
         condition: service_healthy
 
-  # ─────────────────────────────────────────
-  # CACHÉ (Redis)
-  # ─────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: dataops_redis
@@ -67,9 +58,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─────────────────────────────────────────
-  # BACKEND (Node.js + Express)
-  # ─────────────────────────────────────────
   backend:
     build:
       context: ./backend
@@ -79,28 +67,25 @@ services:
     environment:
       NODE_ENV: development
       PORT: 4000
-      # PostgreSQL
       DB_HOST: postgres
       DB_PORT: 5432
       DB_USER: ${POSTGRES_USER:-dataops}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-dataops123}
       DB_NAME: ${POSTGRES_DB:-dataops_db}
-      # Redis
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      # JWT
       JWT_SECRET: ${JWT_SECRET:-supersecreto_dataops_2024}
       JWT_EXPIRES_IN: 8h
-      # Email alertas (opcional)
       SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
-      # Nube backup
       AWS_ACCESS_KEY: ${AWS_ACCESS_KEY:-}
       AWS_SECRET_KEY: ${AWS_SECRET_KEY:-}
       AWS_BUCKET: ${AWS_BUCKET:-}
       AZURE_CONNECTION_STRING: ${AZURE_CONNECTION_STRING:-}
+      AZURE_STORAGE_CONNECTION_STRING: ${AZURE_STORAGE_CONNECTION_STRING:-}
+      AZURE_CONTAINER_NAME: ${AZURE_CONTAINER_NAME:-backups}
     ports:
       - "4000:4000"
     volumes:
@@ -115,9 +100,6 @@ services:
       redis:
         condition: service_healthy
 
-  # ─────────────────────────────────────────
-  # FRONTEND (React)
-  # ─────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -136,9 +118,6 @@ services:
     depends_on:
       - backend
 
-  # ─────────────────────────────────────────
-  # MONITOREO (Prometheus)
-  # ─────────────────────────────────────────
   prometheus:
     image: prom/prometheus:latest
     container_name: dataops_prometheus
@@ -155,9 +134,6 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--web.enable-lifecycle'
 
-  # ─────────────────────────────────────────
-  # VISUALIZACIÓN (Grafana)
-  # ─────────────────────────────────────────
   grafana:
     image: grafana/grafana:latest
     container_name: dataops_grafana
@@ -176,9 +152,6 @@ services:
     depends_on:
       - prometheus
 
-# ─────────────────────────────────────────
-# VOLÚMENES PERSISTENTES
-# ─────────────────────────────────────────
 volumes:
   postgres_data:
   postgres_replica_data:
@@ -187,9 +160,6 @@ volumes:
   grafana_data:
   backups_data:
 
-# ─────────────────────────────────────────
-# RED INTERNA
-# ─────────────────────────────────────────
 networks:
   dataops_network:
     driver: bridge

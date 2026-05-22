@@ -2,8 +2,32 @@ const pool = require('../config/database');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { BlobServiceClient } = require('@azure/storage-blob');
 
-// Calcular checksum MD5 de un archivo
+// Cliente Azure
+const getAzureClient = () => {
+  const connStr = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  const containerName = process.env.AZURE_CONTAINER_NAME || 'backups';
+  if (!connStr) return null;
+  const blobServiceClient = BlobServiceClient.fromConnectionString(connStr);
+  return blobServiceClient.getContainerClient(containerName);
+};
+
+// Subir backup a Azure
+const uploadToAzure = async (filePath, blobName) => {
+  try {
+    const containerClient = getAzureClient();
+    if (!containerClient) return null;
+    const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+    await blockBlobClient.uploadFile(filePath);
+    return blockBlobClient.url;
+  } catch (error) {
+    console.error('Error subiendo a Azure:', error);
+    return null;
+  }
+};
+
+// Calcular checksum MD5
 const calculateChecksum = (filePath) => {
   if (!fs.existsSync(filePath)) return null;
   const fileBuffer = fs.readFileSync(filePath);
@@ -14,9 +38,7 @@ const calculateChecksum = (filePath) => {
 const createBackupFile = (nombre, size_mb) => {
   const backupsDir = path.join(__dirname, '../../backups');
   if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
-  
   const filePath = path.join(backupsDir, `${nombre}.bak`);
-  // Simular contenido del backup
   fs.writeFileSync(filePath, `BACKUP:${nombre}:${Date.now()}:SIZE:${size_mb}MB`);
   return filePath;
 };
@@ -25,7 +47,6 @@ const createBackupFile = (nombre, size_mb) => {
 const getBackups = async (req, res) => {
   try {
     const { db_id, tipo, status } = req.query;
-
     let query = `
       SELECT b.*, c.nombre as db_nombre, c.motor
       FROM backup_history b
@@ -33,13 +54,10 @@ const getBackups = async (req, res) => {
       WHERE 1=1
     `;
     const params = [];
-
     if (db_id) { params.push(db_id); query += ` AND b.db_id = $${params.length}`; }
     if (tipo)  { params.push(tipo);  query += ` AND b.tipo = $${params.length}`; }
     if (status){ params.push(status);query += ` AND b.status = $${params.length}`; }
-
     query += ' ORDER BY b.created_at DESC';
-
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (error) {
@@ -52,7 +70,6 @@ const getBackups = async (req, res) => {
 const runBackup = async (req, res) => {
   try {
     const { db_id, tipo = 'FULL', nombre } = req.body;
-
     if (!db_id) return res.status(400).json({ error: 'db_id es requerido' });
 
     const validTipos = ['FULL', 'DIFF', 'INC', 'SNAPSHOT'];
@@ -63,7 +80,6 @@ const runBackup = async (req, res) => {
     const backupNombre = nombre || `backup_${tipo}_${Date.now()}`;
     const startTime = Date.now();
 
-    // Registrar backup como RUNNING
     const backupRecord = await pool.query(`
       INSERT INTO backup_history (db_id, tipo, nombre, status, rpo_minutes, rto_minutes)
       VALUES ($1, $2, $3, 'RUNNING', 15, 45)
@@ -72,17 +88,18 @@ const runBackup = async (req, res) => {
 
     const backupId = backupRecord.rows[0].id;
 
-    // Simular tiempo de backup
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // Crear archivo de backup simulado
     const size_mb = parseFloat((Math.random() * 500 + 50).toFixed(2));
     const filePath = createBackupFile(backupNombre, size_mb);
     const checksum = calculateChecksum(filePath);
     const duration_sec = Math.floor((Date.now() - startTime) / 1000);
     const restorePoint = new Date();
 
-    // Para DIFF e INC buscar el backup padre
+    // Subir a Azure
+    const blobName = `${tipo}/${backupNombre}.bak`;
+    const cloudUrl = await uploadToAzure(filePath, blobName);
+
     let parentId = null;
     if (tipo === 'DIFF') {
       const parent = await pool.query(`
@@ -100,7 +117,6 @@ const runBackup = async (req, res) => {
       parentId = parent.rows[0]?.id || null;
     }
 
-    // Actualizar registro como SUCCESS
     await pool.query(`
       UPDATE backup_history SET
         status = 'SUCCESS',
@@ -110,16 +126,18 @@ const runBackup = async (req, res) => {
         local_path = $4,
         checksum_md5 = $5,
         parent_backup_id = $6,
-        sla_cumplido = true
-      WHERE id = $7
-    `, [size_mb, duration_sec, restorePoint, filePath, checksum, parentId, backupId]);
+        sla_cumplido = true,
+        cloud_provider = $7,
+        cloud_url = $8
+      WHERE id = $9
+    `, [size_mb, duration_sec, restorePoint, filePath, checksum, parentId,
+        cloudUrl ? 'Azure' : null, cloudUrl, backupId]);
 
-    const backup = await pool.query(
-      'SELECT * FROM backup_history WHERE id = $1', [backupId]
-    );
+    const backup = await pool.query('SELECT * FROM backup_history WHERE id = $1', [backupId]);
 
     res.status(201).json({
       message: `✅ Backup ${tipo} completado exitosamente`,
+      cloud: cloudUrl ? `☁️ Subido a Azure: ${cloudUrl}` : '⚠️ Sin replicación en nube',
       backup: backup.rows[0]
     });
   } catch (error) {
@@ -132,12 +150,9 @@ const runBackup = async (req, res) => {
 const createSnapshot = async (req, res) => {
   try {
     const { db_id, nombre } = req.body;
-
     const validSnapshots = ['PRE_DEPLOY', 'PRE_TEST', 'PRE_IMPORT'];
     if (!validSnapshots.includes(nombre)) {
-      return res.status(400).json({ 
-        error: 'Nombre inválido. Use: PRE_DEPLOY, PRE_TEST, PRE_IMPORT' 
-      });
+      return res.status(400).json({ error: 'Nombre inválido. Use: PRE_DEPLOY, PRE_TEST, PRE_IMPORT' });
     }
 
     const backupNombre = `snapshot_${nombre}_${Date.now()}`;
@@ -145,16 +160,22 @@ const createSnapshot = async (req, res) => {
     const filePath = createBackupFile(backupNombre, size_mb);
     const checksum = calculateChecksum(filePath);
 
+    // Subir snapshot a Azure
+    const blobName = `snapshots/${backupNombre}.bak`;
+    const cloudUrl = await uploadToAzure(filePath, blobName);
+
     const result = await pool.query(`
       INSERT INTO backup_history 
         (db_id, tipo, nombre, size_mb, duration_sec, restore_point, 
-         local_path, checksum_md5, status, sla_cumplido)
-      VALUES ($1, 'SNAPSHOT', $2, $3, 1, NOW(), $4, $5, 'SUCCESS', true)
+         local_path, checksum_md5, status, sla_cumplido, cloud_provider, cloud_url)
+      VALUES ($1, 'SNAPSHOT', $2, $3, 1, NOW(), $4, $5, 'SUCCESS', true, $6, $7)
       RETURNING *
-    `, [db_id, backupNombre, size_mb, filePath, checksum]);
+    `, [db_id, backupNombre, size_mb, filePath, checksum,
+        cloudUrl ? 'Azure' : null, cloudUrl]);
 
     res.status(201).json({
       message: `✅ Snapshot ${nombre} creado exitosamente`,
+      cloud: cloudUrl ? `☁️ Subido a Azure: ${cloudUrl}` : '⚠️ Sin replicación en nube',
       snapshot: result.rows[0]
     });
   } catch (error) {
@@ -167,8 +188,6 @@ const createSnapshot = async (req, res) => {
 const simulateDisaster = async (req, res) => {
   try {
     const { db_id } = req.body;
-
-    // Buscar último backup disponible
     const lastBackup = await pool.query(`
       SELECT * FROM backup_history
       WHERE db_id = $1 AND status = 'SUCCESS'
@@ -176,16 +195,13 @@ const simulateDisaster = async (req, res) => {
     `, [db_id]);
 
     if (lastBackup.rows.length === 0) {
-      return res.status(404).json({ 
-        error: 'No hay backups disponibles para restaurar' 
-      });
+      return res.status(404).json({ error: 'No hay backups disponibles para restaurar' });
     }
 
     const backup = lastBackup.rows[0];
     const disasterTime = new Date();
     const restoreStart = Date.now();
 
-    // Simular tiempo de restauración
     await new Promise(resolve => setTimeout(resolve, 1500));
 
     const restoreTime = Date.now() - restoreStart;
@@ -199,7 +215,8 @@ const simulateDisaster = async (req, res) => {
         disaster_time: disasterTime,
         backup_usado: backup.nombre,
         backup_tipo: backup.tipo,
-        restore_point: backup.restore_point
+        restore_point: backup.restore_point,
+        cloud_url: backup.cloud_url || 'No disponible'
       },
       sla: {
         rpo_minutes: rpo,
@@ -229,11 +246,11 @@ const getBackupStats = async (req, res) => {
         COUNT(*) FILTER (WHERE tipo = 'DIFF') as diff_backups,
         COUNT(*) FILTER (WHERE tipo = 'INC') as inc_backups,
         COUNT(*) FILTER (WHERE tipo = 'SNAPSHOT') as snapshots,
+        COUNT(*) FILTER (WHERE cloud_url IS NOT NULL) as en_nube,
         AVG(size_mb)::NUMERIC(10,2) as avg_size_mb,
         AVG(duration_sec)::INTEGER as avg_duration_sec
       FROM backup_history
     `);
-
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Error obteniendo stats de backup:', error);
